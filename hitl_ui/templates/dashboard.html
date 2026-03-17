@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SOC Pod HITL Dashboard</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,sans-serif;background:#f8f9fa;color:#212529}
+  header{background:#1B3A5C;color:#fff;padding:16px 24px;display:flex;align-items:center;gap:16px}
+  header h1{font-size:18px;font-weight:600}
+  .badge{background:#E37B26;color:#fff;border-radius:12px;padding:2px 10px;font-size:13px;font-weight:700}
+  .container{max-width:1100px;margin:24px auto;padding:0 16px}
+  .section-title{font-size:15px;font-weight:600;color:#1B3A5C;margin:24px 0 12px;padding-bottom:6px;border-bottom:2px solid #2E75B6}
+  table{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+  th{background:#1B3A5C;color:#fff;padding:10px 14px;text-align:left;font-size:13px;font-weight:600}
+  td{padding:10px 14px;font-size:13px;border-bottom:1px solid #eee}
+  tr:last-child td{border-bottom:none}
+  tr:hover td{background:#f0f4ff}
+  .review-btn{background:#2E75B6;color:#fff;border:none;padding:6px 14px;border-radius:4px;font-size:12px;cursor:pointer;text-decoration:none;display:inline-block}
+  .review-btn:hover{background:#1B3A5C}
+  .pill{border-radius:12px;padding:2px 10px;font-size:11px;font-weight:600;display:inline-block}
+  .pill-approve{background:#E2EFDA;color:#3B6D11}
+  .pill-reject{background:#FCE4D6;color:#A32D2D}
+  .pill-escalate{background:#FFF2CC;color:#BA7517}
+  .pill-pending{background:#DEEAF1;color:#1B3A5C}
+  .empty{text-align:center;color:#888;padding:32px;font-size:14px}
+  .meta{font-size:12px;color:#666;margin-top:4px}
+  .refresh{font-size:12px;color:#888;float:right;margin-top:4px}
+</style>
+<meta http-equiv="refresh" content="30">
+</head>
+<body>
+<header>
+  <div>
+    <h1>SOC Pod HITL Review Queue</h1>
+    <div class="meta">Lightweight stack — replaced by SAO HITL dashboard at migration</div>
+  </div>
+  {% if pending %}
+  <span class="badge">{{ pending|length }} pending</span>
+  {% endif %}
+  <div style="margin-left:auto" class="refresh">Auto-refreshes every 30s</div>
+</header>
+
+<div class="container">
+  <div class="section-title">Pending review</div>
+  {% if pending %}
+  <table>
+    <thead><tr>
+      <th>Job ID</th><th>Agent</th><th>Tenant</th><th>Jurisdiction</th>
+      <th>Submitted</th><th>Action</th>
+    </tr></thead>
+    <tbody>
+    {% for job in pending %}
+    <tr>
+      <td style="font-family:monospace;font-size:12px">{{ job.job_id[:16] }}…</td>
+      <td>{{ job.agent_id }}</td>
+      <td>{{ job.tenant_id }}</td>
+      <td><span class="pill pill-pending">{{ job.jurisdiction }}</span></td>
+      <td>{{ job.submitted_at.strftime('%Y-%m-%d %H:%M') if job.submitted_at else '—' }}</td>
+      <td><a class="review-btn" href="/hitl/review/{{ job.job_id }}">Review →</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">No jobs pending review.</div>
+  {% endif %}
+
+  <div class="section-title">Recently resolved (last 20)</div>
+  {% if recent %}
+  <table>
+    <thead><tr>
+      <th>Job ID</th><th>Agent</th><th>Tenant</th>
+      <th>Decision</th><th>Reviewer</th><th>Resolved</th>
+    </tr></thead>
+    <tbody>
+    {% for job in recent %}
+    <tr>
+      <td style="font-family:monospace;font-size:12px">{{ job.job_id[:16] }}…</td>
+      <td>{{ job.agent_id }}</td>
+      <td>{{ job.tenant_id }}</td>
+      <td>
+        {% if job.decision == 'APPROVE' %}
+          <span class="pill pill-approve">APPROVED</span>
+        {% elif job.decision == 'REJECT' %}
+          <span class="pill pill-reject">REJECTED</span>
+        {% elif job.decision == 'ESCALATE' %}
+          <span class="pill pill-escalate">ESCALATED</span>
+        {% else %}
+          {{ job.decision }}
+        {% endif %}
+      </td>
+      <td>{{ job.reviewer_id or '—' }}</td>
+      <td>{{ job.resolved_at.strftime('%Y-%m-%d %H:%M') if job.resolved_at else '—' }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">No resolved jobs yet.</div>
+  {% endif %}
+</div>
+</body>
+</html>

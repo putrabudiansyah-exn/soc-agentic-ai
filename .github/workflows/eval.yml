@@ -1,0 +1,193 @@
+name: Eval CI Gate
+
+# Blocks merge if:
+#   - Tier accuracy drops below 92%
+#   - False negative rate exceeds 1%
+#   - Any hallucination test fails (out-of-scope asset appears in output)
+#   - Accuracy drops > 2% vs last baseline
+
+on:
+  push:
+    paths:
+      - "agents/triage/prompts/**"
+      - "agents/triage/tier_classifier.py"
+      - "core/context_builder.py"
+      - "agents/triage/graph.py"
+  pull_request:
+    paths:
+      - "agents/triage/prompts/**"
+      - "agents/triage/tier_classifier.py"
+      - "core/context_builder.py"
+  schedule:
+    - cron: "0 2 * * *"    # 02:00 UTC nightly
+  workflow_dispatch:        # manual trigger
+
+jobs:
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install pytest pytest-asyncio
+      - name: Run tier classifier unit tests
+        run: pytest tests/unit/test_tier_classifier.py -v --tb=short
+      - name: Verify tier classifier has no shim imports
+        run: python -c "
+import ast, sys
+src = open('agents/triage/tier_classifier.py').read()
+tree = ast.parse(src)
+bad = [ast.dump(n) for n in ast.walk(tree)
+       if isinstance(n,(ast.Import,ast.ImportFrom))
+       and any(m in ast.dump(n) for m in ['quality_signal','cost_tracker','hitl_client','sao_sdk'])]
+if bad:
+    print('FAIL: tier_classifier.py imports shims:', bad)
+    sys.exit(1)
+print('PASS: No shim imports in tier_classifier.py')
+"
+
+  eval-id:
+    name: Eval — Indonesia
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: soc
+          POSTGRES_PASSWORD: soc
+          POSTGRES_DB: socdev
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U soc -d socdev"
+          --health-interval 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+      opa:
+        image: openpolicyagent/opa:latest-rootless
+        ports: ["8181:8181"]
+        options: >-
+          --entrypoint '["run","--server","--addr=0.0.0.0:8181","--log-level=error"]'
+    env:
+      POSTGRES_DSN:   "postgresql://soc:soc@localhost:5432/socdev"
+      REDIS_URL:      "redis://localhost:6379"
+      OPA_URL:        "http://localhost:8181/v1/data/sao/agent/policy"
+      VLLM_BASE_URL:  ${{ secrets.TOGETHER_API_BASE_URL }}
+      VLLM_API_KEY:   ${{ secrets.TOGETHER_API_KEY }}
+      CLICKHOUSE_URL: ""          # skipped in CI
+      HITL_UI_URL:    ""          # skipped in CI
+      WAZUH_BASE_URL: "mock"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Initialise database
+        run: python scripts/init_db.py
+      - name: Load OPA policies
+        run: |
+          curl -X PUT http://localhost:8181/v1/policies/agent_policy \
+            -H "Content-Type: text/plain" \
+            --data-binary @policies/agent_policy.rego
+      - name: Start Triage Agent
+        run: |
+          uvicorn agents.triage.main:app --host 0.0.0.0 --port 8080 &
+          sleep 8
+          curl -f http://localhost:8080/health
+      - name: Generate fixtures (if none cached)
+        run: |
+          if [ -z "$(ls eval/fixtures/ID/*.json 2>/dev/null)" ]; then
+            python eval/generate_fixtures.py --jurisdiction ID --count 60
+          fi
+      - name: Run ID eval suite
+        run: |
+          python eval/runner.py \
+            --jurisdiction ID \
+            --agent-url http://localhost:8080 \
+            --output /tmp/ID_results.json
+      - name: Check gates
+        run: |
+          python - << 'EOF'
+          import json, sys
+          data    = json.load(open("/tmp/ID_results.json"))
+          metrics = data["metrics"]
+          failures= data["failures"]
+          print(f"Tier accuracy:       {metrics['tier_accuracy']:.1%}")
+          print(f"False negative rate: {metrics['false_negative_rate']:.1%}")
+          print(f"Error count:         {metrics.get('error_count',0)}")
+          if failures:
+              print("\nGATE FAILURES:")
+              for f in failures: print(f"  {f}")
+              sys.exit(1)
+          print("\nAll gates passed.")
+          EOF
+      - name: Compare to baseline
+        run: |
+          python - << 'EOF'
+          import json, sys, os
+          current  = json.load(open("/tmp/ID_results.json"))["metrics"]
+          baseline_path = "eval/baselines/ID_latest.json"
+          if not os.path.exists(baseline_path):
+              print("No baseline yet — creating.")
+              sys.exit(0)
+          baseline = json.load(open(baseline_path))["metrics"]
+          drop = baseline["tier_accuracy"] - current["tier_accuracy"]
+          if drop > 0.02:
+              print(f"GATE FAIL: accuracy dropped {drop:.1%} vs baseline (max 2%)")
+              sys.exit(1)
+          print(f"Accuracy delta vs baseline: {-drop:+.1%} (pass)")
+          EOF
+      - name: Save baseline (main branch only)
+        if: github.ref == 'refs/heads/main' && success()
+        run: cp /tmp/ID_results.json eval/baselines/ID_latest.json
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-results-ID
+          path: /tmp/ID_results.json
+
+  hallucination-check:
+    name: Hallucination tests — cross-tenant isolation
+    runs-on: ubuntu-latest
+    needs: unit-tests
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Verify tier classifier rejects out-of-scope assertions
+        run: |
+          python - << 'EOF'
+          # Verify that the tier classifier does not leak cross-tenant data
+          # by ensuring it only operates on the assessment dict, not external state
+          from agents.triage.tier_classifier import classify_tier
+          import sys
+
+          # Inject a synthetic out-of-scope asset reference into the assessment
+          assessment = {
+              "severity_assessment": "high",
+              "confidence": 0.8,
+              "lateral_movement_indicators": False,
+              "_injected_tenant": "tenant-other-org",    # should be ignored
+              "_injected_asset":  "srv-other-org-db-01",  # should be ignored
+          }
+          tier, rationale = classify_tier(assessment)
+          # Verify the injected fields didn't leak into the rationale
+          if "tenant-other-org" in rationale or "srv-other-org" in rationale:
+              print("FAIL: Cross-tenant data leaked into tier rationale")
+              sys.exit(1)
+          print(f"PASS: tier={tier}, rationale clean of injected data")
+          EOF

@@ -1,0 +1,225 @@
+# Kubernetes CronJob manifests for scheduled agents
+# Deploy to the sovereign node namespace after agents are running.
+# Usage: kubectl apply -f k8s/cronjobs.yaml -n soc-platform
+#
+# Note: These work on the lightweight stack (no SAO dependency).
+# At SAO migration: no changes needed — SAO does not manage CronJobs.
+
+---
+# Compliance Agent — continuous monitoring every 4 hours
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: compliance-continuous
+  namespace: soc-platform
+  labels:
+    app: soc-compliance
+    mode: continuous
+spec:
+  schedule: "0 */4 * * *"       # Every 4 hours
+  concurrencyPolicy: Forbid      # Never overlap runs
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 1800  # 30 min hard limit
+      template:
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: soc-agent  # IRSA on AWS
+          containers:
+          - name: trigger
+            image: python:3.11-slim
+            command:
+            - python
+            - -c
+            - |
+              import httpx, os, json
+
+              AGENT_URL  = os.environ["COMPLIANCE_AGENT_URL"]
+              TENANT_IDS = os.environ["TENANT_IDS"].split(",")
+
+              for tenant_id in TENANT_IDS:
+                  if not tenant_id.strip():
+                      continue
+                  r = httpx.post(f"{AGENT_URL}/jobs", json={
+                      "tenant_id":  tenant_id.strip(),
+                      "mode":       "continuous",
+                      "framework_id":"ID_PDP_OJK",
+                  }, timeout=300.0)
+                  r.raise_for_status()
+                  print(f"Compliance job submitted for {tenant_id}: {r.json()}")
+            env:
+            - name: COMPLIANCE_AGENT_URL
+              value: "http://soc-compliance:8082"
+            - name: TENANT_IDS
+              valueFrom:
+                configMapKeyRef:
+                  name: soc-config
+                  key: tenant_ids
+            resources:
+              requests: {cpu: "50m", memory: "64Mi"}
+              limits:   {cpu: "100m", memory: "128Mi"}
+
+---
+# Compliance Agent — monthly board report (1st of month at 08:00)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: compliance-board-report
+  namespace: soc-platform
+  labels:
+    app: soc-compliance
+    mode: board_report
+spec:
+  schedule: "0 8 1 * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 3600
+      template:
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: soc-agent
+          containers:
+          - name: trigger
+            image: python:3.11-slim
+            command:
+            - python
+            - -c
+            - |
+              import httpx, os
+              AGENT_URL  = os.environ["COMPLIANCE_AGENT_URL"]
+              TENANT_IDS = os.environ["TENANT_IDS"].split(",")
+              for tenant_id in TENANT_IDS:
+                  if not tenant_id.strip():
+                      continue
+                  r = httpx.post(f"{AGENT_URL}/jobs", json={
+                      "tenant_id": tenant_id.strip(),
+                      "mode":      "board_report",
+                  }, timeout=600.0)
+                  r.raise_for_status()
+                  print(f"Board report job submitted: {r.json()}")
+            env:
+            - name: COMPLIANCE_AGENT_URL
+              value: "http://soc-compliance:8082"
+            - name: TENANT_IDS
+              valueFrom:
+                configMapKeyRef:
+                  name: soc-config
+                  key: tenant_ids
+            resources:
+              requests: {cpu: "50m", memory: "64Mi"}
+              limits:   {cpu: "100m", memory: "128Mi"}
+
+---
+# Threat Hunter — weekly scan (every Monday at 03:00)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: threat-hunter-weekly
+  namespace: soc-platform
+  labels:
+    app: soc-hunter
+    mode: weekly_scan
+spec:
+  schedule: "0 3 * * 1"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 3600
+      template:
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: soc-agent
+          containers:
+          - name: trigger
+            image: python:3.11-slim
+            command:
+            - python
+            - -c
+            - |
+              import httpx, os
+              AGENT_URL  = os.environ["HUNTER_AGENT_URL"]
+              TENANT_IDS = os.environ["TENANT_IDS"].split(",")
+              for tenant_id in TENANT_IDS:
+                  if not tenant_id.strip():
+                      continue
+                  r = httpx.post(f"{AGENT_URL}/jobs", json={
+                      "tenant_id": tenant_id.strip(),
+                      "mode":      "weekly_scan",
+                  }, timeout=1800.0)
+                  r.raise_for_status()
+                  print(f"Weekly scan submitted: {r.json()}")
+            env:
+            - name: HUNTER_AGENT_URL
+              value: "http://soc-hunter:8084"
+            - name: TENANT_IDS
+              valueFrom:
+                configMapKeyRef:
+                  name: soc-config
+                  key: tenant_ids
+            resources:
+              requests: {cpu: "50m", memory: "64Mi"}
+              limits:   {cpu: "100m", memory: "128Mi"}
+
+---
+# Threat Hunter — quarterly report (1st Jan, Apr, Jul, Oct at 08:00)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: threat-hunter-quarterly
+  namespace: soc-platform
+  labels:
+    app: soc-hunter
+    mode: quarterly_report
+spec:
+  schedule: "0 8 1 1,4,7,10 *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 7200
+      template:
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: soc-agent
+          containers:
+          - name: trigger
+            image: python:3.11-slim
+            command:
+            - python
+            - -c
+            - |
+              import httpx, os
+              AGENT_URL  = os.environ["HUNTER_AGENT_URL"]
+              TENANT_IDS = os.environ["TENANT_IDS"].split(",")
+              for tenant_id in TENANT_IDS:
+                  if not tenant_id.strip():
+                      continue
+                  r = httpx.post(f"{AGENT_URL}/jobs", json={
+                      "tenant_id": tenant_id.strip(),
+                      "mode":      "quarterly_report",
+                  }, timeout=3600.0)
+                  r.raise_for_status()
+                  print(f"Quarterly report submitted: {r.json()}")
+            env:
+            - name: HUNTER_AGENT_URL
+              value: "http://soc-hunter:8084"
+            - name: TENANT_IDS
+              valueFrom:
+                configMapKeyRef:
+                  name: soc-config
+                  key: tenant_ids
+            resources:
+              requests: {cpu: "50m", memory: "64Mi"}
+              limits:   {cpu: "100m", memory: "128Mi"}
+
+---
+# ConfigMap — shared tenant list and config
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: soc-config
+  namespace: soc-platform
+data:
+  tenant_ids: "tenant-pilot-id"   # comma-separated; add tenants here as they onboard

@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Review {{ job_id[:12] }}… — SOC Pod HITL</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,sans-serif;background:#f8f9fa;color:#212529}
+  header{background:#1B3A5C;color:#fff;padding:14px 24px}
+  header h1{font-size:17px;font-weight:600}
+  header .meta{font-size:12px;color:#a0b8d0;margin-top:4px}
+  .container{max-width:1000px;margin:24px auto;padding:0 16px;display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .card{background:#fff;border-radius:8px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+  .card h2{font-size:14px;font-weight:600;color:#1B3A5C;margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid #eee}
+  pre{font-size:12px;background:#f4f6f9;padding:12px;border-radius:4px;overflow-x:auto;white-space:pre-wrap;word-break:break-word}
+  .info-row{display:flex;gap:8px;margin-bottom:8px;font-size:13px}
+  .info-label{color:#666;min-width:110px;font-weight:500}
+  .badge{border-radius:12px;padding:2px 10px;font-size:12px;font-weight:600;display:inline-block}
+  .badge-id{background:#DEEAF1;color:#1B3A5C}
+  .badge-juris{background:#E2EFDA;color:#3B6D11}
+  .badge-timeout{background:#FFF2CC;color:#BA7517}
+  .decision-section{grid-column:1/-1;background:#fff;border-radius:8px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+  .decision-section h2{font-size:14px;font-weight:600;color:#1B3A5C;margin-bottom:16px}
+  .btn-row{display:flex;gap:12px;margin-bottom:16px}
+  .btn{border:none;padding:10px 20px;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;transition:opacity .15s}
+  .btn:hover{opacity:.85}
+  .btn-approve{background:#3B6D11;color:#fff}
+  .btn-reject{background:#A32D2D;color:#fff}
+  .btn-escalate{background:#BA7517;color:#fff}
+  .btn-selected{outline:3px solid #1B3A5C;outline-offset:2px}
+  textarea{width:100%;border:1px solid #ddd;border-radius:4px;padding:10px;font-size:13px;resize:vertical;min-height:80px;font-family:inherit}
+  label{font-size:13px;font-weight:500;color:#444;display:block;margin-bottom:6px}
+  input[type=text]{width:100%;border:1px solid #ddd;border-radius:4px;padding:8px 10px;font-size:13px}
+  .submit-btn{background:#1B3A5C;color:#fff;border:none;padding:12px 28px;border-radius:6px;font-size:14px;font-weight:600;cursor:pointer;margin-top:12px}
+  .submit-btn:hover{background:#2E75B6}
+  .submit-btn:disabled{background:#aaa;cursor:not-allowed}
+  .timer{font-size:13px;color:#BA7517;font-weight:600}
+  .qs-check{display:flex;align-items:center;gap:8px;padding:4px 0;font-size:13px}
+  .check-pass{color:#3B6D11}
+  .check-fail{color:#A32D2D;font-weight:600}
+  .check-sev{font-size:11px;padding:1px 6px;border-radius:8px;font-weight:600}
+  .sev-high{background:#FCE4D6;color:#A32D2D}
+  .sev-medium{background:#FFF2CC;color:#BA7517}
+  .sev-low{background:#E2EFDA;color:#3B6D11}
+  #result-banner{display:none;padding:14px 20px;border-radius:6px;font-weight:600;margin-top:16px}
+</style>
+</head>
+<body>
+<header>
+  <h1>HITL Review — {{ agent_id }}</h1>
+  <div class="meta">
+    Job: {{ job_id }} &nbsp;|&nbsp;
+    Tenant: {{ tenant_id }} &nbsp;|&nbsp;
+    Submitted: {{ submitted_at.strftime('%Y-%m-%d %H:%M UTC') if submitted_at else '—' }}
+    &nbsp;|&nbsp;
+    <span class="timer" id="timer">{{ minutes_left }} min remaining</span>
+  </div>
+</header>
+
+<div class="container">
+  <!-- Left: metadata -->
+  <div class="card">
+    <h2>Job details</h2>
+    <div class="info-row"><span class="info-label">Job ID</span>
+      <span class="badge badge-id" style="font-family:monospace;font-size:11px">{{ job_id }}</span></div>
+    <div class="info-row"><span class="info-label">Jurisdiction</span>
+      <span class="badge badge-juris">{{ jurisdiction }}</span></div>
+    <div class="info-row"><span class="info-label">Agent</span>{{ agent_id }}</div>
+    <div class="info-row"><span class="info-label">Tenant</span>{{ tenant_id }}</div>
+
+    <h2 style="margin-top:20px">Quality Signal checks</h2>
+    {% if qs.checks is defined %}
+    {% for check in qs.checks %}
+    <div class="qs-check">
+      {% if check.passed %}
+        <span class="check-pass">✓</span>
+      {% else %}
+        <span class="check-fail">✗</span>
+      {% endif %}
+      <span class="check-sev sev-{{ check.severity.lower() }}">{{ check.severity }}</span>
+      <span>{{ check.name }}</span>
+    </div>
+    {% endfor %}
+    {% else %}
+    <pre>{{ qs_pretty }}</pre>
+    {% endif %}
+  </div>
+
+  <!-- Right: draft content -->
+  <div class="card">
+    <h2>Agent draft output</h2>
+    <pre id="draft-display">{{ draft_pretty }}</pre>
+  </div>
+
+  <!-- Decision section — full width -->
+  <div class="decision-section">
+    <h2>Analyst decision</h2>
+    <div class="btn-row">
+      <button class="btn btn-approve"   onclick="select('APPROVE')">✓ Approve</button>
+      <button class="btn btn-reject"    onclick="select('REJECT')">✗ Reject</button>
+      <button class="btn btn-escalate"  onclick="select('ESCALATE')">↑ Escalate</button>
+    </div>
+
+    <label for="reviewer-id">Your analyst ID (Keycloak username)</label>
+    <input type="text" id="reviewer-id" placeholder="e.g. analyst01" style="margin-bottom:12px">
+
+    <label for="notes">Notes (required for REJECT; recommended for all decisions)</label>
+    <textarea id="notes" placeholder="Enter review notes…"></textarea>
+
+    <button class="submit-btn" id="submit-btn" onclick="submitDecision()" disabled>
+      Submit decision
+    </button>
+
+    <div id="result-banner"></div>
+  </div>
+</div>
+
+<script>
+  let selectedDecision = null;
+
+  function select(d) {
+    selectedDecision = d;
+    document.querySelectorAll('.btn').forEach(b => b.classList.remove('btn-selected'));
+    const map = {'APPROVE':'.btn-approve','REJECT':'.btn-reject','ESCALATE':'.btn-escalate'};
+    document.querySelector(map[d]).classList.add('btn-selected');
+    document.getElementById('submit-btn').disabled = false;
+  }
+
+  async function submitDecision() {
+    const reviewerId = document.getElementById('reviewer-id').value.trim();
+    const notes      = document.getElementById('notes').value.trim();
+    if (!reviewerId) { alert('Please enter your analyst ID'); return; }
+    if (selectedDecision === 'REJECT' && !notes) {
+      alert('Notes are required for REJECT'); return;
+    }
+
+    const btn = document.getElementById('submit-btn');
+    btn.disabled = true;
+    btn.textContent = 'Submitting…';
+
+    const resp = await fetch('/hitl/review/{{ job_id }}/decide', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        decision:    selectedDecision,
+        reviewer_id: reviewerId,
+        notes:       notes,
+      }),
+    });
+
+    const banner = document.getElementById('result-banner');
+    banner.style.display = 'block';
+    if (resp.ok) {
+      banner.style.background = '#E2EFDA';
+      banner.style.color      = '#3B6D11';
+      banner.textContent = `Decision recorded: ${selectedDecision}. Redirecting…`;
+      setTimeout(() => window.location.href = '/', 1500);
+    } else {
+      banner.style.background = '#FCE4D6';
+      banner.style.color      = '#A32D2D';
+      banner.textContent = 'Error submitting decision. Please try again.';
+      btn.disabled = false;
+      btn.textContent = 'Submit decision';
+    }
+  }
+
+  // Countdown timer
+  let mins = {{ minutes_left }};
+  const timerEl = document.getElementById('timer');
+  setInterval(() => {
+    if (mins > 0) mins--;
+    timerEl.textContent = `${mins} min remaining`;
+    if (mins <= 5) timerEl.style.color = '#A32D2D';
+  }, 60000);
+</script>
+</body>
+</html>

@@ -1,0 +1,219 @@
+version: "3.9"
+
+# AI SOC Pod — Lightweight Development Stack
+# No SAO dependency. All services self-contained.
+# Usage: docker compose up -d
+#        python scripts/init_db.py
+#        python scripts/run_event.py --event-file eval/fixtures/ID/brute-force-critical.json
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: soc-postgres
+    environment:
+      POSTGRES_USER: soc
+      POSTGRES_PASSWORD: soc
+      POSTGRES_DB: socdev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U soc -d socdev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: soc-redis
+    command: redis-server --requirepass socredis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "socredis", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    container_name: soc-clickhouse
+    ports:
+      - "8123:8123"   # HTTP
+      - "9000:9000"   # Native
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping | grep -q Ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  opa:
+    image: openpolicyagent/opa:latest-rootless
+    container_name: soc-opa
+    ports:
+      - "8181:8181"
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--log-level=info"
+      - "/policies"
+    volumes:
+      - ./policies:/policies:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8181/health | grep -q ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  hitl-ui:
+    build:
+      context: ./hitl_ui
+      dockerfile: Dockerfile
+    container_name: soc-hitl-ui
+    ports:
+      - "8090:8090"
+    environment:
+      - POSTGRES_DSN=postgresql://soc:soc@postgres:5432/socdev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8090/health | grep -q ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Triage agent — add more services for other agents as they are built
+  triage-agent:
+    build:
+      context: ./agents/triage
+      dockerfile: Dockerfile
+    container_name: soc-triage
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_DSN=postgresql://soc:soc@postgres:5432/socdev
+      - REDIS_URL=redis://:socredis@redis:6379
+      - OPA_URL=http://opa:8181/v1/data/sao/agent/policy
+      - HITL_UI_URL=http://hitl-ui:8090
+      - CLICKHOUSE_URL=http://clickhouse:8123
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opa:
+        condition: service_healthy
+      hitl-ui:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health | grep -q ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  auditor-agent:
+    build:
+      context: ./agents/auditor
+      dockerfile: Dockerfile
+    container_name: soc-auditor
+    ports:
+      - "8081:8081"
+    env_file: .env
+    environment:
+      - POSTGRES_DSN=postgresql://soc:soc@postgres:5432/socdev
+      - REDIS_URL=redis://:socredis@redis:6379
+      - OPA_URL=http://opa:8181/v1/data/sao/agent/policy
+      - HITL_UI_URL=http://hitl-ui:8090
+      - CLICKHOUSE_URL=http://clickhouse:8123
+    depends_on:
+      postgres: {condition: service_healthy}
+      opa:      {condition: service_healthy}
+      hitl-ui:  {condition: service_healthy}
+
+  compliance-agent:
+    build:
+      context: ./agents/compliance
+      dockerfile: Dockerfile
+    container_name: soc-compliance
+    ports:
+      - "8082:8082"
+    env_file: .env
+    environment:
+      - POSTGRES_DSN=postgresql://soc:soc@postgres:5432/socdev
+      - OPA_URL=http://opa:8181/v1/data/sao/agent/policy
+      - HITL_UI_URL=http://hitl-ui:8090
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - WAZUH_BASE_URL=mock
+    depends_on:
+      postgres: {condition: service_healthy}
+      opa:      {condition: service_healthy}
+
+  remediation-agent:
+    build:
+      context: ./agents/remediation
+      dockerfile: Dockerfile
+    container_name: soc-remediation
+    ports:
+      - "8083:8083"
+    env_file: .env
+    environment:
+      - POSTGRES_DSN=postgresql://soc:soc@postgres:5432/socdev
+      - OPA_URL=http://opa:8181/v1/data/sao/agent/policy
+      - HITL_UI_URL=http://hitl-ui:8090
+      - CLICKHOUSE_URL=http://clickhouse:8123
+    depends_on:
+      postgres: {condition: service_healthy}
+      opa:      {condition: service_healthy}
+
+  threat-hunter-agent:
+    build:
+      context: ./agents/threat_hunter
+      dockerfile: Dockerfile
+    container_name: soc-hunter
+    ports:
+      - "8084:8084"
+    env_file: .env
+    environment:
+      - POSTGRES_DSN=postgresql://soc:soc@postgres:5432/socdev
+      - OPA_URL=http://opa:8181/v1/data/sao/agent/policy
+      - CLICKHOUSE_URL=http://clickhouse:8123
+      - AUTOBAHN_BASE_URL=mock
+    depends_on:
+      postgres: {condition: service_healthy}
+      opa:      {condition: service_healthy}
+
+  event-consumer:
+    build:
+      context: ./pipeline
+      dockerfile: Dockerfile
+    container_name: soc-consumer
+    env_file:
+      - .env
+    environment:
+      - REDIS_URL=redis://:socredis@redis:6379
+      - TRIAGE_AGENT_URL=http://triage-agent:8080
+      - TENANT_IDS=tenant-pilot-id,eval-tenant-id
+    depends_on:
+      redis:
+        condition: service_healthy
+      triage-agent:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  clickhouse_data:
